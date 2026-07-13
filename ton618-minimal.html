@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>TON 618</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;overflow:hidden;background:#04060b}
+  #glcanvas{position:fixed;inset:0;width:100%;height:100%;display:block;cursor:grab}
+  #glcanvas.dragging{cursor:grabbing}
+
+  #drop{
+    position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:10;
+    font-family:'IBM Plex Mono',monospace;font-size:13px;letter-spacing:.22em;text-transform:uppercase;
+    color:#ffb35c;background:rgba(9,13,20,.55);border:1px solid rgba(255,179,92,.55);border-radius:8px;
+    padding:16px 34px;cursor:pointer;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+    box-shadow:0 0 30px rgba(255,179,92,.15);
+    transition:all .25s;
+  }
+  #drop:hover{background:rgba(255,179,92,.14);box-shadow:0 0 44px rgba(255,179,92,.35)}
+  #drop.gone{opacity:0;pointer-events:none;transform:translate(-50%,-50%) scale(.92)}
+
+  #caption{
+    position:fixed;top:calc(50% - 62px);left:50%;transform:translateX(-50%);z-index:10;
+    font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.3em;text-transform:uppercase;
+    color:#66748a;opacity:0;transition:opacity 1.2s;pointer-events:none;white-space:nowrap;
+  }
+  #caption.show{opacity:1}
+
+  #fade{position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;transition:opacity 2s;z-index:8}
+  #fade.show{opacity:1}
+
+  #err{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:30;background:#04060b;padding:30px;text-align:center;font-size:14px;color:#c9d3e2;font-family:system-ui;line-height:1.6}
+</style>
+</head>
+<body>
+
+<canvas id="glcanvas"></canvas>
+<div id="fade"></div>
+<div id="caption">You are inside TON 618</div>
+<button id="drop">▼ Drop into the hole</button>
+<div id="err">This needs WebGL2 (GPU shaders).<br>Try a recent version of Chrome, Firefox, Edge, or Safari.</div>
+
+<script>
+/* TON 618 — minimal build.
+   One button. Geodesic ray tracing, accretion disk, Doppler beaming,
+   free-fall with relativistic aberration. Nothing else. */
+
+const canvas = document.getElementById('glcanvas');
+const gl = canvas.getContext('webgl2', {antialias:false, alpha:false});
+if(!gl){ document.getElementById('err').style.display='flex'; throw new Error('no webgl2'); }
+
+const VERT = `#version 300 es
+precision highp float;
+const vec2 P[3] = vec2[3](vec2(-1.,-1.), vec2(3.,-1.), vec2(-1.,3.));
+void main(){ gl_Position = vec4(P[gl_VertexID], 0., 1.); }`;
+
+const FRAG = `#version 300 es
+precision highp float;
+out vec4 fragColor;
+
+uniform vec2  u_res;
+uniform float u_time;
+uniform float u_dist;
+uniform float u_yaw;
+uniform float u_pitch;
+uniform float u_plunge;
+uniform float u_beta;
+uniform float u_lookYaw;
+uniform float u_lookPitch;
+
+#define R_IN  3.0
+#define R_OUT 14.0
+#define TEMP  6500.0
+
+float hash21(vec2 p){ p = fract(p*vec2(234.34, 435.345)); p += dot(p, p+34.23); return fract(p.x*p.y); }
+float hash13(vec3 p){ p = fract(p*0.1031); p += dot(p, p.zyx+31.32); return fract((p.x+p.y)*p.z); }
+float vnoise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  f = f*f*(3.-2.*f);
+  float a = hash21(i), b = hash21(i+vec2(1,0));
+  float c = hash21(i+vec2(0,1)), d = hash21(i+vec2(1,1));
+  return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);
+}
+float fbm(vec2 p){
+  float v = 0., a = 0.5;
+  for(int i=0;i<4;i++){ v += a*vnoise(p); p = p*2.13 + 17.7; a *= 0.5; }
+  return v;
+}
+
+vec3 blackbody(float T){
+  T = clamp(T, 1000., 40000.)/100.;
+  float r, g, b;
+  if(T <= 66.){ r = 1.0; g = clamp(0.3901*log(T)-0.6318, 0., 1.); }
+  else{ r = clamp(1.2929*pow(T-60., -0.1332), 0., 1.); g = clamp(1.1298*pow(T-60., -0.0755), 0., 1.); }
+  if(T >= 66.) b = 1.0;
+  else if(T <= 19.) b = 0.0;
+  else b = clamp(0.5432*log(T-10.)-1.1963, 0., 1.);
+  return vec3(r,g,b);
+}
+
+vec3 starfield(vec3 rd){
+  vec3 col = vec3(0.);
+  vec3 p = rd*380.;
+  for(int i=0;i<3;i++){
+    vec3 id = floor(p);
+    vec3 f  = fract(p)-0.5;
+    float h = hash13(id);
+    if(h > 0.994){
+      float star = smoothstep(0.38, 0.0, length(f));
+      float tw = 0.75 + 0.25*sin(u_time*1.7 + h*47.0);
+      vec3 tint = mix(vec3(0.68,0.78,1.0), vec3(1.0,0.86,0.7), fract(h*57.3));
+      col += star * star * (fract(h*91.7)*1.2 + 0.25) * tw * tint;
+    }
+    p = p*1.83 + 41.3;
+  }
+  float band = pow(max(0., 1. - abs(rd.y*1.7 + rd.x*0.5 + 0.2)), 3.);
+  col += band * vec3(0.055,0.06,0.10) * (0.4 + 0.6*fbm(rd.xz*4.0 + rd.y*3.0));
+  return col;
+}
+
+vec4 diskShade(vec3 hit, vec3 photonDir){
+  float r = length(hit.xz);
+  float edge = smoothstep(R_IN, R_IN+0.55, r) * smoothstep(R_OUT, R_OUT-4.5, r);
+  if(edge <= 0.001) return vec4(0.);
+
+  float w = 0.9 / pow(r, 1.5);
+  float ang = -u_time * w;
+  float ca = cos(ang), sa = sin(ang);
+  vec2 q = mat2(ca,-sa,sa,ca) * hit.xz;
+  vec2 dir = q / r;
+  float n = fbm(dir*6.5 + vec2(r*2.6, r*1.2));
+  n = 0.55 + 0.9*(n-0.5);
+  float bands = 0.72 + 0.28*sin(r*6.0 + n*5.0);
+
+  float Temit = TEMP * pow(R_IN/r, 0.75);
+
+  vec3 tangent = normalize(vec3(-hit.z, 0., hit.x));
+  float beta = clamp(inversesqrt(2.0*max(r-1.0, 0.7)), 0., 0.85);
+  float gam = inversesqrt(1.0 - beta*beta);
+  float dopp = 1.0 / (gam * (1.0 - beta*dot(tangent, -photonDir)));
+  float gred = sqrt(max(1.0 - 1.0/r, 0.04));
+  float shift = dopp * gred;
+
+  float Tobs = Temit * shift;
+  float I = pow(shift, 3.0);
+  float lum = pow(R_IN/r, 2.0);
+
+  vec3 col = blackbody(Tobs) * I * lum * n * bands * 2.6;
+  float alpha = clamp(edge * (0.45 + 0.55*n), 0., 1.);
+  return vec4(col*edge, alpha);
+}
+
+vec3 safeUp(vec3 d){ return abs(d.y) > 0.94 ? vec3(1.,0.,0.) : vec3(0.,1.,0.); }
+
+void main(){
+  vec2 uv = (2.0*gl_FragCoord.xy - u_res) / u_res.y;
+
+  float cp = cos(u_pitch), sp = sin(u_pitch);
+  float cy = cos(u_yaw),   sy = sin(u_yaw);
+  vec3 ro = u_dist * vec3(cp*sy, sp, cp*cy);
+  vec3 inward = normalize(-ro);
+
+  vec3 fw = inward;
+  if(u_plunge > 0.5){
+    vec3 rt0 = normalize(cross(inward, safeUp(inward)));
+    vec3 up0 = cross(rt0, inward);
+    float clp = cos(u_lookPitch), slp = sin(u_lookPitch);
+    float cly = cos(u_lookYaw),  sly = sin(u_lookYaw);
+    fw = normalize(inward*clp*cly + rt0*clp*sly + up0*slp);
+  }
+  vec3 rt = normalize(cross(fw, safeUp(fw)));
+  vec3 up = cross(rt, fw);
+  vec3 rd = normalize(fw*1.35 + uv.x*rt + uv.y*up);
+
+  float dopFac = 1.0;
+  if(u_plunge > 0.5 && u_beta > 0.001){
+    float b = u_beta;
+    float g = inversesqrt(1.0 - b*b);
+    float bd = dot(rd, inward);
+    rd = normalize((rd + inward*((g - 1.0)*bd + g*b)) / (g*(1.0 + b*bd)));
+    dopFac = clamp(g*(1.0 + b*bd), 0.30, 3.0);
+  }
+
+  vec3 pos = ro;
+  vec3 vel = rd;
+  vec3 hvec = cross(pos, vel);
+  float h2 = dot(hvec, hvec);
+
+  vec3 accum = vec3(0.);
+  float trans = 1.0;
+  float far2 = max(1600.0, u_dist*u_dist*4.0);
+
+  bool captured = false;
+
+  for(int i=0; i<380; i++){
+    float r2 = dot(pos,pos);
+    float r  = sqrt(r2);
+
+    if(r2 < 1.0){ captured = true; break; }
+    if(r2 > far2 && dot(pos, vel) > 0.0){ break; }
+
+    float dt = max(0.03, (r-1.0)*0.11);
+
+    vec3 acc = -1.5 * h2 * pos / (r2*r2*r);
+    vel += acc * dt;
+    vec3 npos = pos + vel * dt;
+
+    if(pos.y * npos.y < 0.0){
+      float f = pos.y / (pos.y - npos.y);
+      vec3 hit = mix(pos, npos, f);
+      float rr = dot(hit.xz, hit.xz);
+      if(rr > R_IN*R_IN*0.8 && rr < R_OUT*R_OUT*1.1){
+        vec4 d = diskShade(hit, normalize(vel));
+        accum += trans * d.rgb;
+        trans *= (1.0 - d.a*0.92);
+        if(trans < 0.02){ captured = true; break; }
+      }
+    }
+    pos = npos;
+  }
+
+  vec3 col = accum;
+  if(!captured && trans > 0.02){
+    col += trans * starfield(normalize(vel));
+  }
+
+  if(u_plunge > 0.5){
+    col *= pow(dopFac, 3.0);
+    col *= mix(vec3(1.12,0.94,0.78), vec3(0.82,0.94,1.22), smoothstep(0.6, 1.6, dopFac));
+  }
+
+  col *= 1.15;
+  col = (col*(2.51*col + 0.03)) / (col*(2.43*col + 0.59) + 0.14);
+  col = pow(clamp(col, 0., 1.), vec3(0.4545));
+
+  float vig = 1.0 - 0.28*dot(uv*0.55, uv*0.55);
+  col *= vig;
+
+  fragColor = vec4(col, 1.0);
+}`;
+
+function shader(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS)){
+    console.error(gl.getShaderInfoLog(s));
+    document.getElementById('err').style.display='flex';
+    throw new Error('shader compile failed');
+  }
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, shader(gl.VERTEX_SHADER, VERT));
+gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, FRAG));
+gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog, gl.LINK_STATUS)){
+  console.error(gl.getProgramInfoLog(prog));
+  document.getElementById('err').style.display='flex';
+  throw new Error('link failed');
+}
+gl.useProgram(prog);
+const U = {};
+['u_res','u_time','u_dist','u_yaw','u_pitch','u_plunge','u_beta','u_lookYaw','u_lookPitch']
+  .forEach(n => U[n] = gl.getUniformLocation(prog, n));
+
+/* ---------- state ---------- */
+const R0 = 16;
+const state = { dist:R0, yaw:0.55, pitch:7*Math.PI/180, time:0 };
+const plunge = { active:false, ended:false, lookYaw:0, lookPitch:0, beta:0 };
+
+function resize(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.75);
+  canvas.width  = Math.floor(innerWidth  * dpr);
+  canvas.height = Math.floor(innerHeight * dpr);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+}
+addEventListener('resize', resize); resize();
+
+/* drag to orbit (or look around while falling) */
+let dragging = false, lx = 0, ly = 0, idleT = 0;
+canvas.addEventListener('pointerdown', e => {
+  dragging = true; lx = e.clientX; ly = e.clientY; idleT = 0;
+  canvas.classList.add('dragging'); canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointermove', e => {
+  if(!dragging) return;
+  const dx = e.clientX - lx, dy = e.clientY - ly;
+  if(plunge.active || plunge.ended){
+    plunge.lookYaw   += dx * 0.004;
+    plunge.lookPitch = Math.max(-1.35, Math.min(1.35, plunge.lookPitch + dy*0.004));
+  } else {
+    state.yaw   += dx * 0.005;
+    state.pitch = Math.max(-1.53, Math.min(1.53, state.pitch + dy*0.004));
+  }
+  lx = e.clientX; ly = e.clientY;
+});
+canvas.addEventListener('pointerup', () => { dragging = false; canvas.classList.remove('dragging'); });
+
+/* ---------- the button ---------- */
+const dropBtn = document.getElementById('drop');
+const fadeEl = document.getElementById('fade');
+const capEl = document.getElementById('caption');
+
+dropBtn.addEventListener('click', () => {
+  if(plunge.ended){
+    /* reset and fall again */
+    fadeEl.classList.remove('show');
+    capEl.classList.remove('show');
+    plunge.ended = false;
+    state.dist = R0;
+    plunge.lookYaw = 0; plunge.lookPitch = 0;
+  }
+  plunge.active = true;
+  dropBtn.classList.add('gone');
+});
+
+function horizonReached(){
+  plunge.active = false;
+  plunge.ended = true;
+  plunge.beta = 0.98;
+  fadeEl.classList.add('show');
+  setTimeout(() => {
+    capEl.classList.add('show');
+    dropBtn.textContent = '▼ Fall again';
+    dropBtn.classList.remove('gone');
+  }, 1800);
+}
+
+/* ---------- render loop ---------- */
+let last = performance.now();
+function frame(now){
+  const dt = Math.min(0.05, (now - last)/1000); last = now;
+  state.time += dt;
+
+  if(!plunge.active && !plunge.ended && !dragging){
+    idleT += dt;
+    if(idleT > 2.5) state.yaw += dt * 0.05;   /* gentle idle orbit */
+  }
+
+  if(plunge.active){
+    const r = state.dist;
+    plunge.beta = Math.min(0.98, Math.sqrt(Math.max(1/r - 1/R0, 0)));
+    state.dist = Math.max(1.03, r - Math.max(plunge.beta, 0.05) * 1.8 * dt);
+    if(state.dist <= 1.03) horizonReached();
+  }
+
+  gl.uniform2f(U.u_res, canvas.width, canvas.height);
+  gl.uniform1f(U.u_time, state.time);
+  gl.uniform1f(U.u_dist, state.dist);
+  gl.uniform1f(U.u_yaw, state.yaw);
+  gl.uniform1f(U.u_pitch, state.pitch);
+  gl.uniform1f(U.u_plunge, (plunge.active || plunge.ended) ? 1 : 0);
+  gl.uniform1f(U.u_beta, plunge.beta);
+  gl.uniform1f(U.u_lookYaw, plunge.lookYaw);
+  gl.uniform1f(U.u_lookPitch, plunge.lookPitch);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
